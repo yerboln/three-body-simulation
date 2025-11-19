@@ -33,15 +33,6 @@
             gap: 8px;
             min-width: 250px;
         }
-        #analysisResult {
-            margin-top: 10px;
-            padding: 8px;
-            background: rgba(255, 255, 255, 0.1);
-            border-radius: 6px;
-            font-size: 0.8rem;
-            min-height: 50px;
-            max-width: 250px;
-        }
     </style>
 </head>
 <body>
@@ -56,129 +47,102 @@
             <label for="speedSlider">Simulation Speed:</label>
             <span id="speedValue" class="font-bold text-yellow-300">1.0x</span>
         </div>
-        <!-- Max speed is 25.0x -->
         <input type="range" id="speedSlider" min="0.1" max="25.0" step="0.1" value="1.0" class="w-full accent-indigo-500">
         
-        <div class="h-2"></div> <!-- Spacer -->
+        <div class="h-2"></div>
 
         <button id="resetButton" class="px-3 py-1 bg-indigo-600 hover:bg-indigo-700 rounded-lg transition shadow-md">Reset Simulation</button>
-        <!-- Gemini API Integration Button -->
-        <button id="analyzeButton" class="px-3 py-1 bg-yellow-500 text-gray-900 font-semibold hover:bg-yellow-400 rounded-lg transition shadow-md">
-            Analyze Chaos ✨
-        </button>
-        <div id="analysisResult" class="text-gray-300">
-            Click 'Analyze Chaos' to get a physics prediction from the Gemini LLM.
-        </div>
     </div>
 
     <script>
-        // --- GEMINI API CONFIGURATION ---
-        // Global variables for the API key and endpoint.
-        const API_KEY = ""; 
-        const API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent";
-        
-        // --- 3D SETUP ---
-        // Changed const/let to var to prevent "already declared" errors in the execution environment.
+        // --- GLOBAL CONSTANTS & VARIABLES (Using var for global scope consistency) ---
         var scene, camera, renderer, animationId;
-        var G = 0.5; // Gravitational constant (scaled for visualization)
-        var baseTimeStep = 0.01; // The physics step size when speed factor is 1.0
-        var timeStep = baseTimeStep; // Simulation time step (delta t) - This will be updated by the slider
-        var cameraDistance = 200; // Global variable to track current camera distance
-
-        // Removed the fixed initialBodiesConfig as it is now generated randomly on reset.
+        var G = 0.5; // Gravitational constant
+        var baseTimeStep = 0.01;
+        var timeStep = baseTimeStep;
+        var cameraDistance = 200; 
 
         var bodies = [];
-        var resultElement;
         var speedSlider;
         var speedValueSpan;
 
-        // Function to set up the scene and bodies
-        function init() {
-            // Get the result display element
-            resultElement = document.getElementById('analysisResult');
-            speedSlider = document.getElementById('speedSlider');
-            speedValueSpan = document.getElementById('speedValue');
+        // --- BODY CLASS: Encapsulates Body State and Visuals ---
+        class Body {
+            constructor(config, scene) {
+                // Physics Properties
+                this.mass = config.mass;
+                this.position = config.pos.clone();
+                this.velocity = config.vel.clone();
+                this.acceleration = new THREE.Vector3(0, 0, 0);
 
-            // Scene setup
-            scene = new THREE.Scene();
-            scene.background = new THREE.Color(0x0d0d1f);
+                // Visual Mesh
+                const geometry = new THREE.SphereGeometry(config.radius, 32, 32);
+                const material = new THREE.MeshPhongMaterial({ 
+                    color: config.color, 
+                    emissive: config.color, 
+                    emissiveIntensity: 0.4 
+                });
+                this.mesh = new THREE.Mesh(geometry, material);
+                this.mesh.position.copy(this.position);
+                scene.add(this.mesh);
 
-            // Camera setup
-            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-            camera.position.set(cameraDistance, cameraDistance / 2, cameraDistance);
-            camera.lookAt(0, 0, 0);
-
-            // Renderer setup
-            renderer = new THREE.WebGLRenderer({ antialias: true });
-            renderer.setSize(window.innerWidth, window.innerHeight);
-            document.body.appendChild(renderer.domElement);
-
-            // Lighting
-            var ambientLight = new THREE.AmbientLight(0x404040); // soft white light
-            scene.add(ambientLight);
-            var directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
-            directionalLight.position.set(500, 500, 500);
-            scene.add(directionalLight);
-
-            // Add starfield background for a space feel (simple spheres)
-            var starGeometry = new THREE.BufferGeometry();
-            var starMaterial = new THREE.PointsMaterial({ color: 0xffffff, size: 0.5, sizeAttenuation: true });
-            var starVertices = [];
-            for (let i = 0; i < 500; i++) {
-                const x = (Math.random() - 0.5) * 1000;
-                const y = (Math.random() - 0.5) * 1000;
-                const z = (Math.random() - 0.5) * 1000;
-                starVertices.push(x, y, z);
+                // Trail Line
+                const trailLength = 500;
+                this.trailPositions = new Float32Array(trailLength * 3);
+                const trailGeometry = new THREE.BufferGeometry();
+                trailGeometry.setAttribute('position', new THREE.BufferAttribute(this.trailPositions, 3));
+                const trailMaterial = new THREE.LineBasicMaterial({ color: config.color, linewidth: 1 });
+                this.trail = new THREE.Line(trailGeometry, trailMaterial);
+                scene.add(this.trail);
+                this.trailIndex = 0;
+                this.maxTrailIndex = trailLength;
             }
-            starGeometry.setAttribute('position', new THREE.Float32BufferAttribute(starVertices, 3));
-            var stars = new THREE.Points(starGeometry, starMaterial);
-            scene.add(stars);
 
-            // Initialize or reset bodies
-            resetSimulation();
+            // Applies physics step and updates visuals (mesh and trail)
+            update(dt) {
+                // Apply half of the velocity change and update position
+                this.velocity.addScaledVector(this.acceleration, dt);
+                this.position.addScaledVector(this.velocity, dt);
+                this.acceleration.set(0, 0, 0); // Reset acceleration
 
-            // Event listeners
-            window.addEventListener('resize', onWindowResize);
-            document.getElementById('resetButton').addEventListener('click', resetSimulation);
-            document.getElementById('analyzeButton').addEventListener('click', analyzeChaos);
+                // Update mesh position
+                this.mesh.position.copy(this.position);
 
-            // Speed Control Listener
-            speedSlider.addEventListener('input', updateSpeed);
+                // Update trail position (more concise)
+                const i = this.trailIndex * 3;
+                this.trailPositions[i] = this.position.x;
+                this.trailPositions[i + 1] = this.position.y;
+                this.trailPositions[i + 2] = this.position.z;
 
-            // Camera interaction
-            setupMouseControls();
-            
-            // Mouse Wheel Listener for Zoom
-            renderer.domElement.addEventListener('wheel', handleZoom, false);
+                this.trailIndex = (this.trailIndex + 1) % this.maxTrailIndex;
 
+                // Close the loop to ensure a continuous line when wrapping
+                const nextIndex = this.trailIndex * 3;
+                this.trailPositions[nextIndex] = this.position.x;
+                this.trailPositions[nextIndex + 1] = this.position.y;
+                this.trailPositions[nextIndex + 2] = this.position.z;
 
-            // Start animation loop
-            animate();
-        }
-        
-        // Function to handle speed changes from the slider
-        function updateSpeed(event) {
-            const speedFactor = parseFloat(event.target.value);
-            timeStep = baseTimeStep * speedFactor; // Update the global timeStep variable
-            speedValueSpan.textContent = `${speedFactor.toFixed(1)}x`;
+                this.trail.geometry.attributes.position.needsUpdate = true;
+                this.trail.geometry.setDrawRange(0, this.maxTrailIndex);
+            }
         }
 
-        // --- RANDOM INITIALIZATION FUNCTION ---
+        // --- CORE FUNCTIONS ---
+
         function generateRandomBodyConfig() {
             const bodyCount = 3;
-            const colors = [0xff4757, 0x2ed573, 0x1e90ff]; // Fixed colors
-            const minMass = 5;
-            const maxMass = 15;
+            const colors = [0xff4757, 0x2ed573, 0x1e90ff];
+            const minMass = 5, maxMass = 15;
             const maxPos = 60;
             const maxVel = 5;
 
             const configs = [];
             for (let i = 0; i < bodyCount; i++) {
                 const mass = minMass + Math.random() * (maxMass - minMass);
-                const radius = mass / 3; // Radius scales with mass
+                const radius = mass / 3; 
                 const pos = new THREE.Vector3(
                     (Math.random() - 0.5) * maxPos * 2,
-                    (Math.random() - 0.5) * maxPos * 0.5, // Keep Y (vertical) movement smaller for initial setup
+                    (Math.random() - 0.5) * maxPos * 0.5,
                     (Math.random() - 0.5) * maxPos * 2
                 );
                 const vel = new THREE.Vector3(
@@ -187,186 +151,146 @@
                     (Math.random() - 0.5) * maxVel * 2
                 );
 
-                configs.push({
-                    id: i,
-                    name: `Body ${String.fromCharCode(65 + i)}`,
-                    mass: mass,
-                    radius: radius,
-                    color: colors[i],
-                    pos: pos,
-                    vel: vel
-                });
+                configs.push({ mass, radius, color: colors[i], pos, vel });
             }
             return configs;
         }
 
-
-        // --- BODY CLASS ---
-        class Body {
-            constructor(config) {
-                this.mass = config.mass;
-                this.name = config.name; // Keep name for analysis
-                this.position = config.pos.clone();
-                this.velocity = config.vel.clone();
-                this.acceleration = new THREE.Vector3(0, 0, 0);
-
-                // 3D Mesh
-                const geometry = new THREE.SphereGeometry(config.radius, 32, 32);
-                const material = new THREE.MeshPhongMaterial({ color: config.color, emissive: config.color, emissiveIntensity: 0.4 });
-                this.mesh = new THREE.Mesh(geometry, material);
-                this.mesh.position.copy(this.position);
-                scene.add(this.mesh);
-
-                // Trail (Line Segments)
-                const trailLength = 500;
-                const trailGeometry = new THREE.BufferGeometry();
-                const positions = new Float32Array(trailLength * 3);
-                trailGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-                const trailMaterial = new THREE.LineBasicMaterial({ color: config.color, linewidth: 1 });
-                this.trail = new THREE.Line(trailGeometry, trailMaterial);
-                scene.add(this.trail);
-                this.trailPositions = trailGeometry.attributes.position.array;
-                this.trailIndex = 0;
-            }
-
-            // Update the body's position based on its acceleration and velocity
-            update(dt) {
-                // Apply half of the velocity change
-                this.velocity.addScaledVector(this.acceleration, dt);
-
-                // Update position
-                this.position.addScaledVector(this.velocity, dt);
-
-                // Reset acceleration for next frame
-                this.acceleration.set(0, 0, 0);
-
-                // Update mesh position
-                this.mesh.position.copy(this.position);
-
-                // Update trail
-                this.trailPositions[this.trailIndex * 3] = this.position.x;
-                this.trailPositions[this.trailIndex * 3 + 1] = this.position.y;
-                this.trailPositions[this.trailIndex * 3 + 2] = this.position.z;
-
-                this.trailIndex = (this.trailIndex + 1) % (this.trailPositions.length / 3);
-
-                // Set the next segment to the current position to prevent gaps when wrapping
-                this.trailPositions[this.trailIndex * 3] = this.position.x;
-                this.trailPositions[this.trailIndex * 3 + 1] = this.position.y;
-                this.trailPositions[this.trailIndex * 3 + 2] = this.position.z;
-
-                this.trail.geometry.attributes.position.needsUpdate = true;
-                this.trail.geometry.setDrawRange(0, this.trailPositions.length / 3);
-            }
-        }
-
-        // --- PHYSICS CALCULATION ---
-
         function calculateForces(bodies) {
+            const minR = 10;
             for (let i = 0; i < bodies.length; i++) {
                 const body1 = bodies[i];
                 for (let j = i + 1; j < bodies.length; j++) {
                     const body2 = bodies[j];
 
-                    // Vector pointing from body1 to body2 (r_vector)
+                    // Calculate displacement vector rVec (body2 - body1)
                     const rVec = new THREE.Vector3().subVectors(body2.position, body1.position);
-                    const rSq = rVec.lengthSq(); // r^2
-
-                    // To prevent division by zero and extreme forces at close proximity, clamp the distance
-                    const minR = 10;
+                    let rSq = rVec.lengthSq(); 
+                    
+                    // Softening potential
                     const rClamped = Math.max(rSq, minR * minR);
 
-                    // Force magnitude: F = G * m1 * m2 / r^2
+                    // F = G * m1 * m2 / r^2
                     const forceMagnitude = (G * body1.mass * body2.mass) / rClamped;
 
-                    // Normalize rVec to get direction unit vector
+                    // Calculate force vector and acceleration
                     const rDir = rVec.normalize();
+                    const F = rDir.multiplyScalar(forceMagnitude);
 
-                    // Force vector on body 1 (F1)
-                    const F1 = rDir.clone().multiplyScalar(forceMagnitude);
-
-                    // Force vector on body 2 (F2) is equal and opposite
-                    const F2 = F1.clone().negate();
-
-                    // Update accelerations (a = F / m)
-                    body1.acceleration.addScaledVector(F2, 1 / body1.mass);
-                    body2.acceleration.addScaledVector(F1, 1 / body2.mass);
+                    // Apply forces: a = F / m
+                    body1.acceleration.addScaledVector(F, -1 / body1.mass); // F on 1 is negative F
+                    body2.acceleration.addScaledVector(F, 1 / body2.mass);  // F on 2 is F
                 }
             }
         }
 
-        // --- ANIMATION LOOP ---
-
         function animate() {
             animationId = requestAnimationFrame(animate);
-
-            // 1. Calculate forces based on current positions
             calculateForces(bodies);
-
-            // 2. Update positions and velocities
-            // Uses the global 'timeStep' which is controlled by the slider
             bodies.forEach(body => body.update(timeStep));
-
-            // 3. Render the scene
             renderer.render(scene, camera);
         }
 
-        // --- CAMERA CONTROLS ---
+        // --- UTILITY/CONTROL FUNCTIONS ---
+
+        function init() {
+            speedSlider = document.getElementById('speedSlider');
+            speedValueSpan = document.getElementById('speedValue');
+            
+            // Renderer setup
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+
+            // Scene and Camera setup
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x0d0d1f);
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(cameraDistance, cameraDistance / 2, cameraDistance);
+            camera.lookAt(0, 0, 0);
+
+            // Lighting
+            scene.add(new THREE.AmbientLight(0x404040));
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            directionalLight.position.set(1000, 1000, 1000); 
+            scene.add(directionalLight);
+
+            // Starfield
+            createStarfield(1000, 500);
+
+            // Event listeners
+            window.addEventListener('resize', onWindowResize);
+            document.getElementById('resetButton').addEventListener('click', resetSimulation);
+            speedSlider.addEventListener('input', updateSpeed);
+            renderer.domElement.addEventListener('wheel', handleZoom, false);
+            setupMouseControls();
+
+            resetSimulation(); // Initial setup of bodies and start animation
+        }
+
+        function createStarfield(extent, count) {
+            const starGeometry = new THREE.BufferGeometry();
+            const starMaterial = new THREE.PointsMaterial({ color: 0xffffff, size: 0.5, sizeAttenuation: true });
+            const starVertices = [];
+            for (let i = 0; i < count; i++) {
+                starVertices.push(
+                    (Math.random() - 0.5) * extent,
+                    (Math.random() - 0.5) * extent,
+                    (Math.random() - 0.5) * extent
+                );
+            }
+            starGeometry.setAttribute('position', new THREE.Float32BufferAttribute(starVertices, 3));
+            scene.add(new THREE.Points(starGeometry, starMaterial));
+        }
+        
+        function updateSpeed(event) {
+            const speedFactor = parseFloat(event.target.value);
+            timeStep = baseTimeStep * speedFactor;
+            speedValueSpan.textContent = `${speedFactor.toFixed(1)}x`;
+        }
 
         function handleZoom(event) {
-            event.preventDefault(); // Prevent page scrolling
+            event.preventDefault();
 
-            const zoomSpeed = 0.1; // Sensitivity of zoom
+            const zoomSpeed = 0.1;
             const minDistance = 50;
-            const maxDistance = 1500; // Increased max zoom distance
-
-            // Calculate the current position direction relative to origin (0,0,0)
+            const maxDistance = 1500;
             const direction = camera.position.clone().normalize();
 
-            // Calculate new distance. Scroll up (negative deltaY) zooms in.
             if (event.deltaY > 0) {
-                // Zoom out (increase distance)
                 cameraDistance = Math.min(maxDistance, cameraDistance + cameraDistance * zoomSpeed);
             } else {
-                // Zoom in (decrease distance)
                 cameraDistance = Math.max(minDistance, cameraDistance - cameraDistance * zoomSpeed);
             }
 
-            // Set the new camera position, maintaining the current direction (orbit angle)
             camera.position.copy(direction).multiplyScalar(cameraDistance);
-            camera.lookAt(0, 0, 0); // Keep looking at the origin
+            camera.lookAt(0, 0, 0);
         }
         
-        // Simple mouse control for orbiting the central point (0,0,0)
-        // Changed const/let to var for mouse control variables as well.
         var isDragging = false;
         var previousMousePosition = { x: 0, y: 0 };
-        var rotationSpeed = 0.005;
+        const rotationSpeed = 0.005;
 
         function setupMouseControls() {
-            renderer.domElement.addEventListener('mousedown', (e) => {
+            const domElement = renderer.domElement;
+
+            domElement.addEventListener('mousedown', (e) => {
                 isDragging = true;
                 previousMousePosition.x = e.clientX;
                 previousMousePosition.y = e.clientY;
             });
 
-            renderer.domElement.addEventListener('mouseup', () => {
+            domElement.addEventListener('mouseup', () => {
                 isDragging = false;
             });
 
-            renderer.domElement.addEventListener('mousemove', (e) => {
+            domElement.addEventListener('mousemove', (e) => {
                 if (!isDragging) return;
 
                 const deltaX = e.clientX - previousMousePosition.x;
                 const deltaY = e.clientY - previousMousePosition.y;
 
-                // Rotate the camera around the origin
-                const rotation = new THREE.Euler(0, 0, 0, 'YXZ');
-                rotation.setFromQuaternion(camera.quaternion);
-
-                const offset = new THREE.Vector3();
-                offset.copy(camera.position);
-
+                const offset = camera.position.clone();
                 const up = new THREE.Vector3(0, 1, 0);
 
                 // Rotate around the Y-axis (Yaw)
@@ -374,63 +298,44 @@
                 offset.applyQuaternion(quaternionY);
 
                 // Rotate around the local X-axis (Pitch)
-                const quaternionX = new THREE.Quaternion().setFromAxisAngle(camera.localToWorld(new THREE.Vector3(1, 0, 0)).normalize(), -deltaY * rotationSpeed);
+                const localXAxis = camera.localToWorld(new THREE.Vector3(1, 0, 0)).normalize();
+                const quaternionX = new THREE.Quaternion().setFromAxisAngle(localXAxis, -deltaY * rotationSpeed);
                 offset.applyQuaternion(quaternionX);
 
                 camera.position.copy(offset);
                 camera.lookAt(0, 0, 0);
                 
-                // Update cameraDistance variable after rotation
                 cameraDistance = camera.position.length();
 
                 previousMousePosition.x = e.clientX;
                 previousMousePosition.y = e.clientY;
             });
 
-            // Prevent context menu on right-click drag
-            renderer.domElement.addEventListener('contextmenu', (e) => {
-                e.preventDefault();
-            });
+            domElement.addEventListener('contextmenu', (e) => e.preventDefault());
         }
         
-        // --- UTILITY FUNCTIONS ---
-
         function resetSimulation() {
-            // Stop current animation if running
+            // Stop animation
             if (animationId) cancelAnimationFrame(animationId);
 
-            // Remove existing meshes and lines from the scene
-            bodies.forEach(body => {
+            // Clean up: Remove all previous bodies' meshes and trails from the scene
+            while(bodies.length) {
+                const body = bodies.pop();
                 scene.remove(body.mesh);
                 scene.remove(body.trail);
-            });
-            bodies = [];
-
-            // *** IMPORTANT: We no longer reset timeStep/speed, preserving the user's setting. ***
-
-            // Reset camera position and distance
-            cameraDistance = 200;
+            }
+            
+            // Reset camera to default view
+            cameraDistance = 200; 
             camera.position.set(cameraDistance, cameraDistance / 2, cameraDistance);
             camera.lookAt(0, 0, 0);
 
-            // Generate new, random initial conditions
+            // Create and add new bodies
             const randomConfig = generateRandomBodyConfig();
-
-            // Recreate bodies
             randomConfig.forEach(config => {
-                // Clone config to ensure new unique positions/velocities for the restart
-                const newConfig = {
-                    ...config,
-                    pos: config.pos.clone(),
-                    vel: config.vel.clone()
-                };
-                bodies.push(new Body(newConfig));
+                // Ensure new unique vectors for each body
+                bodies.push(new Body(config, scene));
             });
-            
-            // Clear analysis result on reset
-            if(resultElement) {
-                resultElement.innerHTML = "Click 'Analyze Chaos' to get a physics prediction from the Gemini LLM.";
-            }
 
             // Re-start animation
             if (renderer) {
@@ -442,77 +347,6 @@
             camera.aspect = window.innerWidth / window.innerHeight;
             camera.updateProjectionMatrix();
             renderer.setSize(window.innerWidth, window.innerHeight);
-        }
-
-        // --- GEMINI LLM INTEGRATION ---
-
-        async function llmFetch(payload, retryCount = 0) {
-            const maxRetries = 5;
-            const delay = Math.pow(2, retryCount) * 1000; // Exponential backoff
-
-            try {
-                const url = `${API_URL}?key=${API_KEY}`;
-                const response = await fetch(url, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload)
-                });
-
-                if (!response.ok) {
-                    throw new Error(`API call failed with status ${response.status}`);
-                }
-                
-                return await response.json();
-            } catch (error) {
-                console.error(`Attempt ${retryCount + 1} failed:`, error);
-                if (retryCount < maxRetries) {
-                    await new Promise(resolve => setTimeout(resolve, delay));
-                    return llmFetch(payload, retryCount + 1);
-                } else {
-                    throw new Error("Failed to connect to the LLM after multiple retries.");
-                }
-            }
-        }
-
-        async function analyzeChaos() {
-            if (!bodies || bodies.length !== 3) {
-                resultElement.textContent = "Error: System not initialized with 3 bodies.";
-                return;
-            }
-
-            resultElement.textContent = "Analyzing chaos... (Please wait)";
-            const analyzeButton = document.getElementById('analyzeButton');
-            analyzeButton.disabled = true;
-
-            // 1. Gather the current state of the system
-            const systemState = bodies.map(body => ({
-                name: body.name,
-                mass: body.mass,
-                position: `(${body.position.x.toFixed(1)}, ${body.position.y.toFixed(1)}, ${body.position.z.toFixed(1)})`,
-                velocity: `(${body.velocity.x.toFixed(1)}, ${body.velocity.y.toFixed(1)}, ${body.velocity.z.toFixed(1)})`
-            }));
-
-            // 2. Construct the prompt
-            const userQuery = `Analyze the following 3-body system initial conditions (Pos=Position, Vel=Velocity, all values in simulation units):
-${systemState.map(s => `${s.name} (Mass ${s.mass}): Pos ${s.position}, Vel ${s.velocity}`).join('\n')}`;
-
-            const systemPrompt = "You are an expert computational physicist specializing in celestial mechanics and the N-body problem. Analyze the provided initial conditions (mass, position, velocity) for a three-body system. Provide a concise, qualitative, and speculative analysis (maximum 4 sentences) of the system's likely long-term chaotic outcome. Focus on potential ejections, binary formation, or general stability/instability.";
-
-            const payload = {
-                contents: [{ parts: [{ text: userQuery }] }],
-                systemInstruction: { parts: [{ text: systemPrompt }] },
-            };
-
-            try {
-                const result = await llmFetch(payload);
-                const text = result.candidates?.[0]?.content?.parts?.[0]?.text || "Analysis failed to return content.";
-                resultElement.textContent = text;
-            } catch (error) {
-                console.error("Gemini API Error:", error);
-                resultElement.textContent = "Error: Could not retrieve analysis from LLM.";
-            } finally {
-                analyzeButton.disabled = false;
-            }
         }
 
         // Start the application when the window loads
